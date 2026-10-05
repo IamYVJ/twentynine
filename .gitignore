@@ -1,0 +1,60 @@
+# Scratch work, not the project.
+#
+# Everything here is UNSHIPPED: one-shot probes written to answer one
+# question, mutation tables written to prove the suite bites, their captured
+# output, and the UI sketches the build was designed against. Not part of the
+# build, not something anybody should have to read, and they must never reach
+# a commit.
+#
+# The convention is the leading underscore, and it is the whole rule: a file
+# named _anything is scratch. Everything without one is the project. It is the
+# same rule judgement and the rest of the family use, so a file moved between
+# the repos keeps its meaning.
+#
+# ---------------------------------------------------------------------------
+# UNSHIPPED IS NOT THE SAME AS DISPOSABLE. DO NOT BULK-DELETE BY THE PATTERN.
+# ---------------------------------------------------------------------------
+# The underscore says "git does not carry this". It does not say "nobody needs
+# this". One of these files is load-bearing:
+#
+#   scripts/_mutate.mjs     THE MUTATION TABLE. Every rule the brief's
+#                           definition of done lists has rows in it, and it is
+#                           how each one was shown to be CAUGHT rather than
+#                           merely made to pass. Run it before trusting a green
+#                           suite after touching js/. There is no command that
+#                           rebuilds it.
+#
+# The sketches (_sketch*.html) are the designs the UI was built against. They
+# use `sk-` prefixed scaffold classes so they cannot inherit app.css rules —
+# see the brief's lesson 14, which is a judgement sketch that reused `.panel`
+# and reported a regression that existed only in the sketch.
+#
+# CAPTURED OUTPUT IS DELETED ON SIGHT. A redirected run log is a transcript of
+# one execution of something that is still on disk and still runnable, and a
+# stale one reads as evidence for a version of the code that no longer exists.
+#
+# NOT ignored, and deliberately so:
+#   scripts/test-engine.mjs   the suite itself
+#   scripts/domshim.mjs       the DOM the suite renders into, headless
+#   scripts/peershim.mjs      the transport the suite talks over, headless
+#   scripts/gen-icons.js      generates icons/, which ships
+#
+# The check that nothing has fallen between the two lists:
+#
+#     git ls-files --others --exclude-standard     # must print nothing
+_*
+
+# Editor/session state.
+.claude/
+
+# OS and editor litter.
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# There are no dependencies — package.json has no "dependencies" key and the
+# page loads ES modules straight from js/. node_modules/ should never appear;
+# it is listed so that if some tool creates one, it is not committed by
+# somebody who did not notice.
+node_modules/
