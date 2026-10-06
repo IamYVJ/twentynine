@@ -1,0 +1,1483 @@
+// ============================================================================
+// main.js — the controller, and the only impure file in the app.
+//
+// Every other module was kept clean of something on purpose, and all of that
+// something ends up here:
+//
+//   js/state.js   has no clock.      This file calls tick().
+//   js/ui.js      has no state.      This file owns `app` and hands it over.
+//   js/net.js     has no game rules. This file routes frames to the engine.
+//   js/bot.js     has no timer.      This file pumps the driver.
+//
+// So this is where the interesting failures live, and it is written defensively
+// on the assumption that it is the file most likely to be wrong.
+//
+// ---------------------------------------------------------------------------
+// TWO MODES, ONE VIEW MODEL
+// ---------------------------------------------------------------------------
+// A device is either the HOST — it holds the only GameEngine that exists and
+// answers everybody — or a CLIENT, which holds no engine at all and draws
+// whatever the host last sent it. `app.pub` / `app.priv` mean exactly the same
+// thing in both cases, which is what lets js/ui.js be written without knowing
+// or caring which mode it is running in.
+//
+// The asymmetry is entirely in how an intent travels:
+//
+//   HOST:    intent -> applyGameIntent(engine, HOST_ID, …) -> push to everyone
+//   CLIENT:  intent -> net.send(...) -> ... -> host does the above -> onState
+//
+// A client NEVER applies its own move optimistically. It sends and waits. That
+// costs a round trip of latency on every tap and buys the thing the brief is
+// most insistent about: there is exactly one opinion about what is legal, it
+// lives on the host, and no screen can ever disagree with it.
+//
+// ---------------------------------------------------------------------------
+// isHost IS NOT isOwner
+// ---------------------------------------------------------------------------
+// Kept apart here the same way js/ui.js and js/intents.js keep them apart.
+// `app.isHost` says this tab runs the engine. `priv.isOwner` says this player
+// holds the controls. This file gates NOTHING on isHost except which code path
+// an intent takes; every permission question is the engine's, asked by passing
+// an actor id and letting _isOwner() answer.
+// ============================================================================
+
+import { render } from './ui.js';
+import { GameEngine, PHASES } from './state.js';
+import { applyGameIntent } from './intents.js';
+import { createBotDriver } from './bot.js';
+import { PRESETS } from './rules.js';
+import {
+  createHost, joinHost, HOST_ID, WIRE, WATCHER,
+  rejectFrame, readRejectFrame, replacedFrame, leaveFrame, hostLeftFrame,
+  peerAvailable, describePeerError, isFatalPeerError,
+} from './net.js';
+import {
+  clientId, loadName, saveName, loadCode, saveCode,
+  normalizeCode, CODE_LENGTH, generateRoomCode, copyText, announcementFor,
+  saveSession, loadSession, clearSession, saveEngineSnapshot, loadEngineSnapshot,
+  leftTable,
+} from './util.js';
+
+// ###########################################################################
+//
+//  THE VIEW MODEL
+//
+// ###########################################################################
+
+// Exactly the shape js/ui.js documents in its header. Kept as one flat mutable
+// object rather than anything cleverer because the renderer is a pure function
+// of it: there is no diffing, no subscription and nothing to keep in sync, so
+// the only rule is "change it, then paint()".
+const app = {
+  screen: 'home',
+  me: { name: loadName() },
+  code: loadCode(),
+  pub: null,
+  priv: null,
+  isHost: false,
+  // A THIRD ROLE, and it is a separate flag rather than a third value of
+  // isHost for the same reason isHost and isOwner are separate: they answer
+  // different questions and a device can be none of them. isHost is "am I
+  // running the engine"; this is "did I ask for a seat". A watcher is neither
+  // host nor player, and the one thing every part of the app has to agree on
+  // is that it never gets a hand — so the flag is held here, where the
+  // reconnect ladder can see it, rather than inferred from app.screen, which
+  // the error screens overwrite.
+  watching: false,
+  // THE TABLE THIS DEVICE LEFT AND CAN STILL GO BACK TO — `{ role, code }`, or
+  // null. It is what the home screen draws its RESUME / REJOIN card from, and
+  // it is a COPY of what is in storage rather than a second source of truth:
+  // set at boot and by goHome() from leftTable(), and never trusted by the
+  // intents that act on it, which read storage again at the moment of the tap.
+  // A record can expire, or be overwritten by another tab, while this page sits
+  // on the home screen showing a button for it.
+  left: null,
+  error: null,
+  selected: null,
+  selectedBid: null,
+  showPad: false,
+  showLog: false,
+  showLeave: false,
+  announce: '',
+  busy: false,
+  reconnecting: false,
+  netWarning: null,
+};
+
+const MY_CLIENT_ID = clientId();
+
+// ###########################################################################
+//
+//  PAINTING
+//
+// ###########################################################################
+
+const root = document.getElementById('app');
+const announcer = document.getElementById('announce');
+const rulesDialog = document.getElementById('rules');
+
+let paintQueued = false;
+
+/**
+ * Ask for a repaint. Coalesced, because a single inbound state frame can
+ * trigger several mutations of `app` in a row and each one would otherwise
+ * rebuild the entire document.
+ */
+function paint() {
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => { paintQueued = false; draw(); });
+}
+
+/**
+ * THE FOCUS PROBLEM, which is the whole reason this function is not one line.
+ *
+ * render() opens with clear(root) and rebuilds every node. That is fine for
+ * cards and scores and catastrophic for a text input: the <input> the player
+ * is typing into is destroyed and replaced between keystrokes, so focus lands
+ * on <body>, the soft keyboard on a phone closes, and the caret jumps to the
+ * end of the field every time. Typing a four-character room code becomes
+ * impossible.
+ *
+ * js/ui.js anticipated this and tags every focusable-and-stateful control with
+ * `data-focus`. So the fix is to note which one had focus and where the caret
+ * was, let the renderer do its destructive thing, and put both back.
+ *
+ * Restoring the SELECTION and not merely the focus matters: without it the
+ * caret snaps to the end, which is invisible when appending and maddening when
+ * correcting a character in the middle.
+ */
+function draw() {
+  const active = document.activeElement;
+  const focusKey = active && active.dataset ? active.dataset.focus : null;
+  const selStart = focusKey && 'selectionStart' in active ? active.selectionStart : null;
+  const selEnd = focusKey && 'selectionEnd' in active ? active.selectionEnd : null;
+
+  render(root, app, intents);
+
+  // Tell the document whether a board is on screen, so css/app.css can hide the
+  // footer under it. Derived by ASKING THE DOM what was just drawn rather than
+  // by testing app.screen and app.pub.phase here: that phase list lives in
+  // js/ui.js's gameScreen() switch, and a copy of it in this file is a copy
+  // that goes stale the first time a phase is added. `.shell-play` is the class
+  // the renderer itself puts on exactly the screens with a pinned strip and
+  // dock, so it cannot disagree with itself.
+  //
+  // `.tv` joins it for the same reason and a stronger one: the TV view fills
+  // the screen edge to edge by design, and a footer under it would either
+  // shrink the board or put a scrollbar on a television. Two selectors rather
+  // than one because they are two different kinds of board, not because the
+  // second is a special case of the first.
+  document.body.classList.toggle('in-play', !!root.querySelector('.shell-play, .tv'));
+
+  if (focusKey) {
+    const next = root.querySelector(`[data-focus="${focusKey}"]`);
+    if (next) {
+      next.focus();
+      // Guarded: setSelectionRange throws on input types that do not support
+      // it, and a a stray throw in here would stop the announce copy below.
+      if (selStart !== null && 'setSelectionRange' in next) {
+        try { next.setSelectionRange(selStart, selEnd); } catch (_) {}
+      }
+    }
+  }
+
+  speak();
+}
+
+/**
+ * Copy the frame's announcement into the PERSISTENT live region.
+ *
+ * #announce is a sibling of #app in index.html and is never rebuilt, because a
+ * live region only fires when text inside an already-present node changes. A
+ * region recreated each frame is new every time and therefore silent every
+ * time — that is lesson one from the sibling projects and the reason for the
+ * whole data-announce indirection.
+ *
+ * Only written when the text actually CHANGES, or a screen reader re-reads the
+ * same sentence on every unrelated repaint.
+ */
+function speak() {
+  if (!announcer) return;
+  const carrier = root.querySelector('[data-announce]');
+  const text = carrier ? carrier.getAttribute('data-announce') : '';
+  if (text && text !== announcer.textContent) announcer.textContent = text;
+}
+
+// How far through pub.log the live region has got. Opaque; announcementFor()
+// in js/util.js owns its shape. One cursor rather than one per role, because a
+// tab is a host or a client and never both — and it is reset in goHome() with
+// the rest of the view model, so leaving one table and joining another starts
+// the log again instead of replaying the last table's final trick.
+let announceCursor = null;
+
+/**
+ * Say whatever the engine has said since the last frame.
+ *
+ * CALLED FROM BOTH SIDES OF THE WIRE, and that is the point. The host reads
+ * the state it just built; a client reads the state it was just sent; both go
+ * through the same function with the same log, so the two never drift into
+ * announcing different games. The alternative — announcing from the intent
+ * that caused the change — would be silent for every move somebody else made,
+ * which is most of them.
+ *
+ * Only ASSIGNS when there is news. An empty result leaves app.announce alone
+ * on purpose: copyCode() writes its confirmation straight into the region and
+ * a repaint half a second later must not wipe it.
+ */
+function announceFrom(pub) {
+  const news = announcementFor(announceCursor, pub && pub.log);
+  announceCursor = news.cursor;
+  if (news.text) app.announce = news.text;
+}
+
+// ###########################################################################
+//
+//  MODE STATE
+//
+// ###########################################################################
+
+let engine = null;     // host only — the one authoritative game
+let host = null;       // host only — the transport handle
+let client = null;     // client only — the transport handle
+let bots = null;       // host only — the bot/absent-seat driver
+let clockTimer = null; // host only — see startClock
+
+/**
+ * WHICH SESSION THE CALLBACKS BELOW BELONG TO.
+ *
+ * Bumped by teardown() and by each of beginHost()/beginJoin(). Every transport
+ * callback captures the value current when it was registered and returns
+ * immediately if it no longer matches — so a callback from a session the user
+ * has left cannot touch `app`, cannot dereference a nulled `engine`, and above
+ * all cannot start anything new.
+ *
+ * This exists because destroy() is not a guarantee. The two failures it stops
+ * are both real and neither is hypothetical:
+ *
+ *   1. A JOIN IN FLIGHT WHEN THE USER GOES HOME. goHome() tears down and shows
+ *      the home screen; the handshake it abandoned then completes, onOpen runs,
+ *      and `app.screen = 'game'` drags the player back into a table they left.
+ *      onError does the same thing to the error screen.
+ *
+ *   2. THE RECONNECT LADDER RESTARTING ITSELF AFTER TEARDOWN. This is the
+ *      nastier one, because teardown() looks like it handles it: it clears
+ *      reconnectTimer. But clearing a timer does not stop a dead client's
+ *      onClose from calling scheduleReconnect() a moment later and setting a
+ *      BRAND NEW one. The tab then quietly re-dials, on a ladder, a room the
+ *      user closed — and nothing on screen says so.
+ *
+ * A counter rather than a flag per handle, because the question being asked is
+ * "is this still the current session", and with two roles, a reconnect ladder
+ * and a resume path there is more than one way to have moved on.
+ */
+let netEpoch = 0;
+
+// ###########################################################################
+//
+//  THE HOST CLOCK
+//
+// ###########################################################################
+
+const TICK_MS = 100;
+
+/**
+ * setInterval, DELIBERATELY NOT requestAnimationFrame.
+ *
+ * The engine's pauses (deal 700ms, reveal 2200ms, trick sweep 1400ms) only
+ * advance when somebody calls tick(), and on this device that somebody is this
+ * timer. rAF is the obvious choice and it is the wrong one: browsers stop
+ * firing it entirely in a backgrounded tab, so the host glancing at a message
+ * would freeze the game for the whole table until they looked back. A
+ * background tab throttles setInterval to roughly once a second rather than
+ * stopping it, so the table keeps moving — the pauses just get lumpy, which is
+ * a far better failure than a dead table.
+ *
+ * 100ms because every deadline in the engine is measured in hundreds of
+ * milliseconds; anything finer is work nobody can see.
+ *
+ * This is not a violation of "no timers in the engine". The engine still takes
+ * time as a parameter and owns no clock; this file owns the clock and passes
+ * the reading in, which is exactly the arrangement js/bot.js's header assumes.
+ */
+function startClock() {
+  if (clockTimer !== null) return;
+  clockTimer = setInterval(() => {
+    if (!engine) return;
+    const now = Date.now();
+    // Both are asked every tick and their answers are OR-ed, because a bot's
+    // move can complete a trick, which arms a sweep the very next tick.
+    const moved = engine.tick(now);
+    const acted = bots ? bots.tick(engine, now) : false;
+    if (moved || acted) push();
+  }, TICK_MS);
+}
+
+function stopClock() {
+  if (clockTimer !== null) { clearInterval(clockTimer); clockTimer = null; }
+}
+
+// ###########################################################################
+//
+//  HOST
+//
+// ###########################################################################
+
+/**
+ * Send the table to every device, and refresh our own view of it.
+ *
+ * The host is a player too, so it takes the same two values it sends everybody
+ * else — the public state, plus its own private slice and nobody else's. It
+ * reads them from the engine directly rather than off the wire, because there
+ * is no wire between a tab and itself, but it reads exactly the same two
+ * things. That symmetry is what stops the host's screen from being able to
+ * show something no client could see.
+ */
+function push() {
+  if (!engine || !host) return;
+  const pub = engine.publicState();
+  host.pushState(pub, (playerId) => engine.privateStateFor(playerId));
+  app.pub = pub;
+  app.priv = engine.privateStateFor(HOST_ID);
+  announceFrom(pub);
+  snapshotSoon();
+  paint();
+}
+
+/**
+ * Persist the engine, at most once every few seconds.
+ *
+ * serialize() walks every seat, every hand and the whole history, and push()
+ * can fire several times a second during a trick. Writing that to localStorage
+ * synchronously on each one would jank the host's animation on the exact
+ * device that everybody else's game depends on staying responsive.
+ *
+ * The trailing edge matters more than the leading one — what must survive a
+ * reload is the LATEST state — so this schedules a write rather than doing one
+ * and blocking the next.
+ */
+const SNAPSHOT_MS = 3000;
+let snapshotTimer = null;
+function snapshotSoon() {
+  if (snapshotTimer !== null) return;
+  snapshotTimer = setTimeout(() => {
+    snapshotTimer = null;
+    if (engine) saveEngineSnapshot(engine.serialize());
+  }, SNAPSHOT_MS);
+}
+
+/**
+ * Begin hosting on `code`.
+ *
+ * `resumed` carries a snapshot when this is a host reload rather than a fresh
+ * room, which is the case the whole of js/util.js's session machinery exists
+ * for: the host's device holds the only copy of the game, so a reload without
+ * this ends the match for everybody else at the table.
+ */
+function beginHost(code, resumed = null) {
+  // BEFORE the listener below is opened, and for a host this is not tidiness:
+  // a peer still lingering from leaveGame() is holding this very room code on
+  // the broker, and resuming would be refused as 'unavailable-id' by ourselves.
+  finishParting();
+  teardown();
+  // See netEpoch. teardown() has just invalidated everything older; this
+  // claims the session for the handlers registered below.
+  const epoch = netEpoch;
+  const live = () => epoch === netEpoch;
+
+  engine = new GameEngine();
+  bots = createBotDriver();
+  app.isHost = true;
+  app.code = code;
+  app.screen = 'game';
+  app.error = null;
+
+  if (resumed) {
+    engine.restore(resumed);
+    // The seat that was ours is identified by clientId, exactly as a reclaim
+    // over the wire would be — a reload is a reconnect that happens to be
+    // instant. Rebinding it to HOST_ID is what makes the restored engine
+    // answer to this tab again.
+    const seat = engine.seats.findIndex((s) => s.clientId === MY_CLIENT_ID);
+    if (seat !== -1) {
+      engine.seats[seat].id = HOST_ID;
+      engine.seats[seat].connected = true;
+      // resumeAsOwner rather than trusting the serialized ownerId, because
+      // that id was the PREVIOUS session's and nothing answers to it now. This
+      // is the documented caller of the method js/intents.js keeps off the
+      // wire precisely because it grants the room unconditionally.
+      engine.resumeAsOwner(HOST_ID);
+    }
+    // Every other seat's id belonged to a connection that no longer exists.
+    // Marking them disconnected is honest — they are — and the scoreboard
+    // shows them greyed until each device dials back in and reclaims by
+    // ticket. Their hands and scores are untouched, which is the requirement.
+    for (const s of engine.seats) {
+      if (s.id !== HOST_ID && !s.isBot) s.connected = false;
+    }
+    bots.reset();
+  } else {
+    engine.addPlayer(HOST_ID, app.me.name, { clientId: MY_CLIENT_ID, isOwner: true });
+  }
+
+  // EVERY handler below opens with `if (!live()) return;`. See netEpoch: past
+  // this point `engine`, `host` and `bots` may all have been nulled by a
+  // teardown that happened while a frame was in flight, and these closures
+  // still hold the old references. The guard is uniform rather than applied
+  // only to the ones that dereference something, because "which of these nine
+  // touches the engine" is a question that changes every time one is edited.
+  host = createHost(code, {
+    onOpen: (openCode) => {
+      if (!live()) return;
+      // The NORMALISED code, as net.js hands it back: the address actually
+      // being listened on, not the string that was typed at it.
+      app.code = openCode;
+      saveCode(openCode);
+      saveSession({ role: 'host', code: openCode, name: app.me.name });
+      paint();
+    },
+
+    onConnect: (playerId) => {
+      if (!live()) return;
+      // Nothing is seated yet — a connection is not a player until it has said
+      // hello with a ticket. But it can be SENT to, so a device that is
+      // reclaiming gets the table immediately rather than after its first move.
+      host.sendTo(playerId, stateFrameForPlayer(playerId));
+    },
+
+    onJoin: (playerId, hello) => {
+      if (!live()) return;
+      if (!hello) {
+        host.sendTo(playerId, rejectFrame('Enter a name first.'));
+        return;
+      }
+
+      // SEAT RECLAIM, the transport half of it. If this ticket already holds a
+      // seat, the engine is about to rebind that seat to the new connection —
+      // and the OLD connection may still be open and counted, because a phone
+      // that lost signal does not close its channel politely. Retiring it
+      // explicitly stops the host holding two channels for one player, and
+      // dropConnection is the method that does it WITHOUT firing onDisconnect,
+      // which would otherwise mark the seat we just handed back as gone.
+      const prior = engine.seats.find((s) => s.clientId && s.clientId === hello.clientId);
+      const stale = prior && prior.id !== playerId ? prior.id : null;
+
+      const r = engine.addPlayer(playerId, hello.name, { clientId: hello.clientId });
+      if (!r.ok) { host.sendTo(playerId, rejectFrame(r.error)); return; }
+
+      if (stale) {
+        // TELL IT WHY, THEN RETIRE IT — in that order, and the order is the
+        // whole fix. A bare close is what a tunnel looks like, so the other
+        // end redials, reclaims the seat from the connection that just took
+        // it, and the two of them trade the chair back and forth forever.
+        // That is not hypothetical: two tabs of the same browser share a
+        // localStorage and therefore share a ticket, which is all it takes.
+        //
+        // Best-effort on purpose. If the frame is lost in flight the old
+        // behaviour is what happens, so nothing depends on it arriving; see
+        // the note above WIRE in js/net.js.
+        host.sendTo(stale, replacedFrame());
+        host.dropConnection(stale);
+      }
+      // A seat coming back mid-pause should not inherit the absent-player
+      // countdown that was running against it.
+      if (bots) bots.reset();
+      push();
+    },
+
+    onWatch: (playerId, accepted) => {
+      if (!live()) return;
+      // ACCEPTED NEEDS NOTHING DOING, and the asymmetry is worth a sentence
+      // because it looks like a missing branch. onConnect above already sent
+      // this connection the whole table the moment it opened, and pushState
+      // reaches it on every change after that — a watcher's seat index is −1,
+      // so stateFrameFor gives it `priv: null` without being asked. Sending
+      // the board again here would be a duplicate frame, not a fix.
+      //
+      // Refused is the case that needs an answer, because the alternative is
+      // a television showing a spinner forever with nothing to say why.
+      if (!accepted) {
+        host.sendTo(playerId, rejectFrame('This table already has as many screens watching as it can carry.'));
+      }
+    },
+
+    onData: (playerId, msg) => {
+      if (!live()) return;
+      // EVERY inbound frame goes through here and nothing else. applyGameIntent
+      // checks the type is one a peer may send at all; the engine then checks
+      // the phase, the turn, the seat, the card and the owner. This function
+      // adds no judgement of its own, which is the point — a second opinion
+      // about legality is a second thing to get wrong.
+      const { handled, result } = applyGameIntent(engine, playerId, msg, Date.now());
+
+      // UNHANDLED MEANS THE ENGINE WAS NEVER ASKED, so there is nothing new to
+      // send and this returns before push().
+      //
+      // It used to fall through and broadcast anyway, which turned one junk
+      // frame from one peer into a full public state serialised and sent to
+      // every other device — the cheapest amplification in the file, and free to
+      // the sender because an unrecognised type never reaches the engine and
+      // so can never be refused by it. The rate limiter in net.js bounds how
+      // fast this can be done; it does not make each one cost nothing.
+      //
+      // A REFUSED intent is different and still pushes. The engine said no,
+      // so the state did not change — but a client asking to play a card it
+      // may not play is usually a client whose view has drifted, and the
+      // answer to that is to send it the truth.
+      if (!handled) return;
+      if (!result.ok) host.sendTo(playerId, rejectFrame(result.error));
+      if (result.ok && bots) bots.reset();
+      push();
+    },
+
+    onDisconnect: (playerId) => {
+      if (!live()) return;
+      // Phase-dependent, and the engine owns which: in the lobby this removes
+      // the seat, mid-match it keeps it holding its hand and its score so the
+      // ticket can claim it back.
+      engine.disconnect(playerId);
+      push();
+    },
+
+    onLeave: (playerId) => {
+      if (!live()) return;
+      // THE SAME SEAT GOING, SAID OUT LOUD. net.js fires this INSTEAD of
+      // onDisconnect, never as well as, so there is exactly one of the two per
+      // connection and nothing here has to de-duplicate.
+      //
+      // `left` is the only thing the goodbye changes, and it changes one
+      // thing: js/bot.js covers this seat at a bot's pace rather than waiting
+      // out the offline grace on every one of its turns. The seat itself is
+      // kept exactly as a dropped one is — hand, bid, score and ticket — so
+      // the same device dialling back in takes it back mid-trick.
+      engine.disconnect(playerId, { left: true });
+      push();
+    },
+
+    onError: (err) => {
+      if (!live()) return;
+      // A host error is almost never fatal — the broker falling over leaves
+      // every existing DataConnection running device to device — so it is a
+      // dismissible banner, not a screen.
+      if (isFatalPeerError(err)) {
+        app.error = describePeerError(err);
+        app.screen = 'error';
+      } else {
+        app.netWarning = describePeerError(err);
+      }
+      paint();
+    },
+
+    onBrokerDown: () => {
+      if (!live()) return;
+      app.netWarning = 'Lost contact with the matchmaking server. The game continues — but nobody new can join until it is back.';
+      paint();
+    },
+    onBrokerUp: () => { if (!live()) return; app.netWarning = null; paint(); },
+    onBrokerLost: () => {
+      if (!live()) return;
+      app.netWarning = 'Could not reach the matchmaking server. The people already here can keep playing; new players cannot join.';
+      paint();
+    },
+  });
+
+  startClock();
+  push();
+}
+
+/** The frame a single device should receive: everything public, plus its own
+ *  private slice. Used by onConnect, where pushState's whole-table loop would
+ *  be needless sends to everybody else. */
+function stateFrameForPlayer(playerId) {
+  return {
+    type: WIRE.STATE,
+    pub: engine.publicState(),
+    priv: engine.privateStateFor(playerId),
+  };
+}
+
+// ###########################################################################
+//
+//  CLIENT
+//
+// ###########################################################################
+
+// The brief's standing rule, and the measurement behind it: a cold TLS
+// handshake to the broker was ~4.6s against 0.8–1.2s warm, so anything under
+// about ten seconds declares a working connection dead. WebRTC also fails
+// SILENTLY on hostile networks — the broker cheerfully says the host exists
+// and then the data channel never opens and nobody errors — so a deadline is
+// the only thing that will ever notice.
+const JOIN_BUDGET_MS = 12000;
+
+// Reconnect attempts after an established game drops. Deliberately patient for
+// the same reason: a screen lock or a 4G handover is seconds, not milliseconds.
+const RECONNECT_DELAYS_MS = [1000, 3000, 7000];
+
+let joinTimer = null;
+let reconnectAt = 0;
+let reconnectTimer = null;
+
+function clearJoinTimer() {
+  if (joinTimer !== null) { clearTimeout(joinTimer); joinTimer = null; }
+}
+
+/** Whether this device is past the handshake and looking at a table — playing
+ *  at it or watching it. The distinction the broker handlers below care about
+ *  is "is there a DataConnection carrying the game", and once there is, the
+ *  broker is a detail the player must not be told about. A watcher is in that
+ *  position for exactly the same reason a player is, so the test is on both
+ *  screens rather than on 'game' alone. */
+function inRoom() {
+  return app.screen === 'game' || app.screen === 'watch';
+}
+
+/**
+ * Dial a room.
+ *
+ * `resuming` distinguishes the two cases the header of joinHost() says only
+ * the controller can tell apart: a FIRST join that times out is an error
+ * screen, while a RECONNECT that times out keeps the table on screen and tries
+ * again. Same transport call, entirely different meaning.
+ *
+ * `watch` asks for the board and no seat. An OPTIONS OBJECT rather than a
+ * second positional boolean, because `beginJoin(code, true, false)` at a call
+ * site says nothing about which `true` is which, and the reconnect ladder is
+ * the one place that has to get both right.
+ */
+function beginJoin(code, { resuming = false, watch = false } = {}) {
+  if (!resuming) { finishParting(); teardown(); }
+  else if (client) { try { client.destroy(); } catch (_) {} client = null; }
+
+  // See netEpoch. Bumped even on the resuming path, where teardown() is
+  // deliberately NOT called — the client being replaced there still has live
+  // handlers, and a rung of the reconnect ladder must not be answered by the
+  // rung before it.
+  const epoch = ++netEpoch;
+  const live = () => epoch === netEpoch;
+
+  app.isHost = false;
+  app.watching = watch;
+  app.code = code;
+  if (!resuming) {
+    app.screen = 'connecting';
+    app.error = null;
+  }
+  paint();
+
+  // As on the host side, every handler opens with the same guard — and here
+  // it is load-bearing rather than defensive. onOpen sets app.screen='game'
+  // and onError sets it to 'error'; either one arriving after the player has
+  // gone Home yanks them somewhere they did not ask to be, and the handshake
+  // that does it was abandoned seconds earlier.
+  client = joinHost(code, {
+    onOpen: () => {
+      if (!live()) return;
+      clearJoinTimer();
+      // AND THE NEXT RUNG, if one is already booked. onError below books it
+      // when a redial is refused, and a refusal is not always the last word on
+      // a dial — so a rung that opens after all must cancel its successor, or
+      // that timer fires into a working connection and replaces it.
+      if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      reconnectAt = 0;
+      app.screen = watch ? 'watch' : 'game';
+      app.reconnecting = false;
+      app.error = null;
+      saveCode(code);
+      // NO SESSION FOR A WATCHER, and this is the one line in the feature that
+      // would be a real bug if it were forgotten. resume() reads this record
+      // on boot and dials with role 'client' — so a TV that reloaded overnight
+      // would come back asking for a SEAT, take one, hold a hand nobody can
+      // see, and be waited on at every turn. For a watcher the URL is the
+      // session: `?watch=CODE` survives a reload by itself and says what it
+      // is, which is exactly what a record that lies about the role does not.
+      if (!watch) saveSession({ role: 'client', code, name: app.me.name });
+      paint();
+    },
+
+    onState: (pub, priv) => {
+      if (!live()) return;
+      app.pub = pub;
+      app.priv = priv;
+      announceFrom(pub);
+      // The move we were waiting on has landed, whatever it was. Clearing the
+      // selection here rather than on send is what makes a REFUSED move keep
+      // its card selected, so the player can see what they tried.
+      app.busy = false;
+      app.selected = null;
+      app.selectedBid = null;
+      paint();
+    },
+
+    // THE HOST HAS GIVEN OUR SEAT TO ANOTHER CONNECTION HOLDING OUR TICKET,
+    // and a ticket is per-device, not per-tab. This is a second tab of the
+    // same browser, or the same page opened twice.
+    //
+    // The close that follows is a millisecond away and would otherwise start
+    // the reconnect ladder, which would win the seat back, which would send
+    // this same frame to the tab that just took it. Two tabs will do that to
+    // each other indefinitely, showing nothing but a spinner each.
+    //
+    // teardown() is what stops it, and it is reused here rather than a new
+    // flag because it already does the exact thing needed: netEpoch++ makes
+    // every callback still in flight — including that onClose — a no-op, and
+    // it cancels the ladder rather than merely declining to extend it. It
+    // also clears app.reconnecting, so the banner does not survive onto this
+    // screen and there is nothing to clear again here — a second assignment
+    // would only suggest to the next reader that teardown might not have.
+    onReplaced: () => {
+      if (!live()) return;
+      teardown();
+      app.screen = 'replaced';
+      // NOT clearSession(), and this is the trap. localStorage is shared by
+      // every tab on the origin, so the record this would delete is the one
+      // the tab that just took the seat wrote a moment ago — and deleting it
+      // means THAT tab cannot resume after a reload. Leaving it costs a
+      // reload of this tab pulling the seat back over once, which is a thing
+      // the player explicitly did and which settles immediately, because the
+      // other tab then lands on this screen in turn.
+      paint();
+    },
+
+    // THE HOST PUT THE TABLE DOWN ON PURPOSE — see intents.leaveGame(), which
+    // is what the other end of this frame looks like. The close that follows
+    // is the same close onReplaced has to get in front of, and hostGone() does
+    // it the same way: teardown() first, so the ladder never starts.
+    //
+    // Without the frame this device would get to the very same screen anyway,
+    // by climbing every rung of the ladder first. So this is not a different
+    // outcome, only the honest one arriving without half a minute of
+    // "reconnecting…" to a table that was not lost.
+    onHostLeft: () => {
+      if (!live()) return;
+      hostGone();
+    },
+
+    onData: (msg) => {
+      if (!live()) return;
+      // The only non-state frame a host sends. readRejectFrame bounds and
+      // trims it, because it is about to be rendered as text.
+      if (msg.type === WIRE.REJECTED) {
+        const text = readRejectFrame(msg);
+        if (text) app.error = text;
+        app.busy = false;
+        // A WATCHER'S ONLY POSSIBLE REFUSAL IS "there is no room to watch",
+        // because a watcher sends nothing else to be refused about — no bid,
+        // no card, no config. So this is fatal where a player's refusal is a
+        // banner, and it has to be: the watcher cap only frees a slot if the
+        // turned-away device actually lets go of it. Left connected, it would
+        // sit there holding the connection it was told it could not have,
+        // still being sent every state frame, and the ceiling would mean
+        // nothing. teardown() for the same reason onReplaced uses it — the
+        // close that follows must not start the reconnect ladder.
+        if (watch) { teardown(); app.screen = 'error'; }
+        paint();
+      }
+    },
+
+    onClose: () => {
+      // THE GUARD THAT MATTERS MOST IN THIS FILE. Without it, a client that
+      // was destroyed by teardown() reports its own closure a moment later,
+      // this runs, and scheduleReconnect() sets a fresh reconnectTimer —
+      // AFTER teardown cleared the old one. The tab then re-dials a room the
+      // user has left, silently, on a ladder, with the home screen showing.
+      if (!live()) return;
+      // The host's tab closed, or the channel died. Which of the two it is
+      // cannot be known from here, so it is treated as recoverable first and
+      // permanent only after the ladder is spent.
+      app.busy = false;
+      scheduleReconnect();
+    },
+
+    onError: (err) => {
+      if (!live()) return;
+      clearJoinTimer();
+      if (isFatalPeerError(err)) {
+        app.error = describePeerError(err);
+        app.screen = 'error';
+        app.reconnecting = false;
+        paint();
+        return;
+      }
+      // Non-fatal before we ever got in is still a failed join; non-fatal
+      // after is a blip to retry.
+      if (app.screen === 'connecting') {
+        app.error = describePeerError(err);
+        app.screen = 'error';
+        paint();
+      } else if (resuming && !(client && client.isOpen())) {
+        // A REDIAL THAT WAS ANSWERED, AND THE ANSWER WAS NO. The broker says
+        // 'peer-unavailable' a few seconds after dialling a host that is not
+        // there — which is the ordinary case once a host has really gone, not
+        // an exotic one.
+        //
+        // This used to fall into the banner below and stop. clearJoinTimer()
+        // at the top of this handler had just cancelled the only thing that
+        // would have moved the ladder on, no close ever comes from a channel
+        // that never opened, and so the table sat under "reconnecting…" for
+        // good with nothing left that could end it. An error on a rung is a
+        // rung that failed, and it is counted as one.
+        scheduleReconnect();
+      } else {
+        app.netWarning = describePeerError(err);
+        paint();
+      }
+    },
+
+    onBrokerDown: () => {
+      if (!live()) return;
+      // Says nothing to a client that is already in a game: its DataConnection
+      // stopped needing the broker the moment the handshake finished, and a
+      // warning about a server the player has never heard of is noise.
+      if (!inRoom()) { app.netWarning = 'Reaching the matchmaking server…'; paint(); }
+    },
+    onBrokerUp: () => { if (!live()) return; app.netWarning = null; paint(); },
+    onBrokerLost: () => {
+      if (!live()) return;
+      if (!inRoom()) {
+        app.error = 'Could not reach the matchmaking server. Check your connection and try again.';
+        app.screen = 'error';
+        paint();
+      }
+    },
+    // WATCHER carries neither the name nor the ticket — see js/net.js. A
+    // watcher that sent its clientId would be handing over the one thing that
+    // identifies this device for a purpose it has no use for.
+  }, watch ? WATCHER : { name: app.me.name, clientId: MY_CLIENT_ID });
+
+  clearJoinTimer();
+  joinTimer = setTimeout(() => {
+    joinTimer = null;
+    // Same reason as onClose above: teardown() clears this timer, but a timer
+    // that has ALREADY fired is past clearing, and its `resuming` branch
+    // starts the reconnect ladder. Guarded here rather than relying on the
+    // clear, because the clear is what was already being relied on.
+    if (!live()) return;
+    if (client && client.isOpen()) return;
+    if (resuming) { scheduleReconnect(); return; }
+    app.screen = 'error';
+    app.error = 'Could not reach that table. Check the code, and that the host still has the game open.';
+    paint();
+  }, JOIN_BUDGET_MS);
+}
+
+/**
+ * Try the room again, on a widening ladder, then give up and say so.
+ *
+ * Giving up lands on 'hostleft' rather than 'error' because by this point
+ * there WAS a game: the distinction the screen makes is "your table went away"
+ * versus "we never found one", and they want different words and a different
+ * button.
+ */
+function scheduleReconnect() {
+  if (reconnectTimer !== null) return;
+  if (reconnectAt >= RECONNECT_DELAYS_MS.length) { hostGone(); return; }
+  const delay = RECONNECT_DELAYS_MS[reconnectAt++];
+  app.reconnecting = true;
+  paint();
+  // The last link in the chain. Everything upstream is now guarded, but this
+  // timer is the one that actually re-dials, and teardown() clearing it is
+  // not enough for a firing that has already begun. Captured at schedule time
+  // rather than read inside, so that a teardown DURING the delay is caught.
+  const epoch = netEpoch;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (epoch !== netEpoch) return;
+    // app.watching, not a captured copy: the role cannot change between the
+    // drop and the redial — nothing in the app switches it while a ladder is
+    // running — and reading it here keeps "what am I" in one place rather than
+    // two that must agree.
+    beginJoin(app.code, { resuming: true, watch: app.watching });
+  }, delay);
+}
+
+/**
+ * Is there a match in progress — the only thing a table can be left IN and
+ * come back TO? A lobby holds no hands and no scores, and a finished match
+ * holds nothing that is still going to change.
+ *
+ * One function for the host's phase and the client's, because they are asking
+ * the same question about the same engine from either side of the wire, and
+ * the wording in js/ui.js's leave sheet makes the same cut.
+ */
+function matchUnderWay(phase) {
+  return phase !== PHASES.LOBBY && phase !== PHASES.MATCH_OVER;
+}
+
+/**
+ * Does this CLIENT have a seat worth keeping a way back to?
+ *
+ * Three ways not to, and each would make the home screen's REJOIN card promise
+ * something untrue. A watcher has no seat, and its way back is its URL. A
+ * device that arrived after the deal was refused one, and would be offered a
+ * second refusal. And a seat in the LOBBY is not kept at all — the engine
+ * splices it out the moment its owner goes, so "your seat is being held" is
+ * exactly the sentence that must not be on screen afterwards. The room code
+ * is still remembered for the join screen, which is all a lobby needs.
+ */
+function holdsSeatInMatch() {
+  return !app.watching && !!app.priv && !!app.pub && matchUnderWay(app.pub.phase);
+}
+
+/**
+ * The table has gone from under this device: the host said goodbye, or the
+ * ladder ran out of rungs. Both end here, because from a client's chair they
+ * are the same fact arrived at by different routes.
+ *
+ * IT USED TO BE THE END OF THE ROAD, and the screen said so — the engine lived
+ * on the host's phone and went with it. That stopped being true when a host
+ * became able to put a game down and pick it up again: the engine is on their
+ * device, in a snapshot, and the same room code brings it back. So this keeps
+ * the one thing that makes a return possible, which is the record of where to
+ * return TO.
+ *
+ * `left: true`, NOT a live session, and the difference is what a reload does.
+ * A live record redials at boot, and a redial of a host who is not there is
+ * twelve seconds of spinner ending in "no table found". A parked one lands on
+ * the home screen with a REJOIN button, which is the same offer made at the
+ * moment it can be taken up rather than at the moment the page happened to
+ * load. See leftTable() in js/util.js.
+ *
+ * Only for a device that HELD A SEAT IN A MATCH — see holdsSeatInMatch().
+ */
+function hostGone() {
+  const seated = holdsSeatInMatch();
+  teardown();
+  if (seated) saveSession({ role: 'client', code: app.code, name: app.me.name, left: true });
+  app.screen = 'hostleft';
+  // The table underneath them is gone, so the things drawn over it go too. A
+  // score pad left open here would sit on top of the screen that explains why
+  // nothing on it is moving.
+  app.showPad = false;
+  app.showLog = false;
+  app.showLeave = false;
+  app.busy = false;
+  paint();
+}
+
+// ###########################################################################
+//
+//  TEARDOWN
+//
+// ###########################################################################
+
+function teardown() {
+  // FIRST, before anything is destroyed. Everything below either cancels a
+  // timer or drops a handle, and both of those can synchronously fire a
+  // callback — so the epoch has to already be stale by the time they run.
+  netEpoch++;
+  stopClock();
+  clearJoinTimer();
+  if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (snapshotTimer !== null) { clearTimeout(snapshotTimer); snapshotTimer = null; }
+  if (host) { try { host.destroy(); } catch (_) {} host = null; }
+  if (client) { try { client.destroy(); } catch (_) {} client = null; }
+  engine = null;
+  bots = null;
+  reconnectAt = 0;
+  app.reconnecting = false;
+  app.netWarning = null;
+}
+
+/**
+ * A HANDLE THAT HAS SAID GOODBYE AND IS BEING GIVEN A MOMENT TO BE HEARD.
+ *
+ * leaveGame() sends one last frame and then wants the transport gone. Doing
+ * those two things back to back is how the frame gets lost: destroy() closes
+ * the peer connection under a send that has been queued and not yet put on the
+ * wire, and the goodbye — the entire point of which is to arrive BEFORE the
+ * close — never leaves the building. So the handle is taken out of `host` /
+ * `client`, where teardown() would destroy it on the spot, and held here for a
+ * few hundred milliseconds instead.
+ *
+ * IT IS ALREADY DEAD TO THE APP WHILE IT WAITS. teardown() runs straight after
+ * and bumps netEpoch, so every handler the handle still owns opens with a
+ * live() that is false: it can finish sending and it cannot do anything else.
+ *
+ * One at a time, and beginHost()/beginJoin() finish it off early. A lingering
+ * HOST peer is still holding the room code on the broker, and the next thing
+ * its owner is likely to press is RESUME, on that code.
+ */
+const PARTING_MS = 400;
+let parting = null;
+
+function partWith(handle) {
+  finishParting();
+  parting = { handle, timer: setTimeout(finishParting, PARTING_MS) };
+}
+
+function finishParting() {
+  if (!parting) return;
+  clearTimeout(parting.timer);
+  try { parting.handle.destroy(); } catch (_) {}
+  parting = null;
+}
+
+// ###########################################################################
+//
+//  INTENTS
+//
+// ###########################################################################
+
+/**
+ * Route a game intent to wherever the engine happens to be.
+ *
+ * The two branches look asymmetric and are not: both end in the same
+ * applyGameIntent call against the same engine. One of them just has a network
+ * in the middle.
+ */
+function dispatch(msg) {
+  app.error = null;
+  if (app.isHost) {
+    const { handled, result } = applyGameIntent(engine, HOST_ID, msg, Date.now());
+    if (handled && !result.ok) app.error = result.error;
+    if (handled && result.ok && bots) bots.reset();
+    push();
+    return;
+  }
+  if (!client) return;
+  // `busy` greys the controls until the host answers. Without it a laggy
+  // connection invites the player to tap twice, and the second tap is refused
+  // as out of turn, which reads as the app being broken.
+  app.busy = true;
+  client.send(msg);
+  paint();
+}
+
+/**
+ * Everything the two dial-a-room intents have in common: the library has to be
+ * there, and four characters have to be four characters.
+ *
+ * Shared rather than copied because the check and the sentence explaining it
+ * are the same check and the same sentence. A second copy would be right on
+ * the day it was written and would be the one that still said "four" after
+ * CODE_LENGTH moved — and the version of that sentence a watcher sees would
+ * be the one nobody ever reads during a normal game.
+ */
+function dialRoom(code, options) {
+  if (!requirePeer()) return;
+  const clean = normalizeCode(code);
+  if (clean.length !== CODE_LENGTH) {
+    app.error = `A room code is ${CODE_LENGTH} characters — letters and numbers, with no O, zero, I or one.`;
+    paint();
+    return;
+  }
+  beginJoin(clean, options);
+}
+
+const intents = {
+  // --- navigation --------------------------------------------------------
+  host() {
+    if (!requirePeer()) return;
+    const code = generateRoomCode();
+    saveName(app.me.name);
+    beginHost(code);
+  },
+
+  goJoin() { app.screen = 'join'; app.error = null; paint(); },
+
+  join(code) {
+    // Before the dial, not after: a join that fails on a mistyped code should
+    // still have remembered the name that was typed next to it.
+    saveName(app.me.name);
+    dialRoom(code, {});
+  },
+
+  // No saveName. A watcher never gives one — see WATCHER in js/net.js — and
+  // writing whatever happens to be in the name field on the way past would
+  // mean a TV that was only ever used to watch has an opinion about who this
+  // device is.
+  watch(code) { dialRoom(code, { watch: true }); },
+
+  cancelJoin() { teardown(); app.screen = 'join'; app.error = null; paint(); },
+
+  /**
+   * Walk away from the table this device is at — and say so on the way out.
+   *
+   * THE ONE EXIT FROM A TABLE, for a player and for the host, in any phase.
+   * goHome() below is what it ends in, and the difference between the two is
+   * everything that has to happen while there is still a table to say it to:
+   *
+   *   A PLAYER tells the host it is going on purpose (see WIRE.LEAVE), so the
+   *   seat is covered at a bot's pace instead of being waited on. The seat is
+   *   kept: this device's ticket takes it back whenever it dials the same code
+   *   again, with the hand and the score it left.
+   *
+   *   THE HOST is the engine, so its leaving stops the game for everybody.
+   *   That is unavoidable; losing the game is not. The snapshot is flushed
+   *   here, synchronously, because the debounced write may be three seconds
+   *   behind and teardown() is about to cancel it — and the clients are told
+   *   (see WIRE.HOSTLEFT) rather than left to work it out from a dead channel.
+   *
+   * WHAT IS KEPT IS DECIDED BY WHETHER THERE IS ANYTHING TO COME BACK TO. A
+   * match that is under way is parked: the session is rewritten with
+   * `left: true`, which goHome() preserves and the home screen offers back.
+   * A lobby is a room and not yet a game — the host walking out closes it, and
+   * a guest's chair in it is not held — a match that has finished is finished,
+   * and a device that never got a seat has none to return to. Those leave no
+   * record, and goHome() clears what was there.
+   */
+  leaveGame() {
+    if (app.isHost && engine && host) {
+      if (matchUnderWay(engine.phase)) {
+        saveEngineSnapshot(engine.serialize());
+        saveSession({ role: 'host', code: app.code, name: app.me.name, left: true });
+      }
+      host.broadcast(hostLeftFrame());
+      // Out of `host` BEFORE goHome() tears down, or teardown() destroys it
+      // with the frame above still queued. See partWith().
+      partWith(host);
+      host = null;
+    } else if (client && !app.watching) {
+      client.send(leaveFrame());
+      if (holdsSeatInMatch()) {
+        saveSession({ role: 'client', code: app.code, name: app.me.name, left: true });
+      }
+      partWith(client);
+      client = null;
+    }
+    intents.goHome();
+  },
+
+  goHome() {
+    teardown();
+    // A PARKED TABLE SURVIVES GOING HOME, and that is the point of parking it.
+    // Home is where every dead end in the app leads — a mistyped code, a host
+    // who has not resumed yet, a broker that was down for a minute — and if
+    // each of those wiped the record, one failed attempt to get back to a game
+    // would be the end of the game. For a host that record is the only copy of
+    // the match that exists.
+    //
+    // A LIVE session is still cleared, exactly as before: this device was at
+    // that table a moment ago and has just been taken away from it, so a
+    // reload must not put it back. What tells the two apart is `left`, and
+    // leftTable() is the one place that reads it.
+    app.left = leftTable();
+    if (!app.left) clearSession();
+    // AND DROP ?watch= FROM THE ADDRESS BAR. For a watcher that URL is the
+    // session — it is what brings a TV back to the right table after an
+    // overnight reload — so leaving it in place would mean Home is a screen
+    // you cannot reload your way off. Stripped here rather than at boot,
+    // because at boot it is still needed.
+    forgetWatchParam();
+    app.screen = 'home';
+    app.pub = null;
+    app.priv = null;
+    app.isHost = false;
+    app.watching = false;
+    app.error = null;
+    app.selected = null;
+    app.selectedBid = null;
+    app.showPad = false;
+    app.showLog = false;
+    app.showLeave = false;
+    // Back to the start of the log, or the first frame of the next table
+    // would be measured against the last table's final line — which is not
+    // in it, so the cursor would not be found and the newest line would be
+    // announced. Harmless by luck rather than by design, and the next change
+    // to announcementFor() would not be.
+    announceCursor = null;
+    app.announce = '';
+    paint();
+  },
+
+  /**
+   * Dial the table this device was just at, from the screen that says it went
+   * away. The role is whatever it was — a television redials as a television —
+   * and teardown() deliberately leaves app.watching alone so that this can
+   * read it.
+   *
+   * Through dialRoom() rather than beginJoin(), so that it is checked the way
+   * a typed code is: app.code has been sitting in memory since the join, and
+   * "it was valid then" is not the same claim as "it is valid".
+   */
+  rejoin() { dialRoom(app.code, { watch: app.watching }); },
+
+  /**
+   * Go back to the table on the home screen's card: resume hosting it, or
+   * rejoin it and take the old seat.
+   *
+   * STORAGE IS ASKED AGAIN, HERE, AT THE TAP. app.left is what the card was
+   * drawn from and it can be minutes old — long enough for the record to pass
+   * its TTL, or for another tab on this device to host something else over the
+   * top of it. Acting on the copy would resume a snapshot that is no longer
+   * the one the button described.
+   */
+  resumeTable() {
+    const table = leftTable();
+    if (!table) {
+      // NOT clearSession(). Whatever is in that slot now is not the table the
+      // card described, and if it is another tab's live session it is that
+      // tab's way back after a reload — the trap onReplaced documents.
+      app.left = null;
+      app.error = 'That game is no longer saved on this device.';
+      paint();
+      return;
+    }
+    if (!requirePeer()) return;
+
+    if (table.role === 'host') {
+      // The same call a host RELOAD makes, with the same snapshot, for the
+      // same reason. Leaving and coming back is a reload the player chose.
+      beginHost(table.code, loadEngineSnapshot());
+      return;
+    }
+
+    // A hello with no name is refused, and the name field on the home screen
+    // may well be empty by now. The seat is found by ticket and keeps the name
+    // it had mid-match, so what goes in the frame only has to be A name — and
+    // the one this device used at that table is the honest choice.
+    const session = loadSession();
+    if (!(app.me.name || '').trim() && session && typeof session.name === 'string') {
+      app.me.name = session.name;
+    }
+    beginJoin(table.code);
+  },
+
+  /** Throw the parked table away. For a host this is the game itself — the
+   *  snapshot goes with the record — so the card says so before it is pressed
+   *  rather than this asking afterwards. */
+  forgetTable() {
+    clearSession();
+    app.left = null;
+    app.error = null;
+    paint();
+  },
+
+  // --- fields ------------------------------------------------------------
+  setName(v) {
+    app.me.name = v;
+    saveName(v);
+    paint();
+  },
+
+  setCode(v) {
+    // Normalised as it is typed, so the field can only ever contain something
+    // dialable and the player finds out about a look-alike character at the
+    // keystroke rather than at the failure.
+    app.code = normalizeCode(v);
+    paint();
+  },
+
+  async copyCode() {
+    const ok = await copyText(app.code);
+    app.announce = ok ? `Room code ${app.code} copied` : 'Could not copy — read it out instead';
+    // Straight into the live region: this is the one action in the app with no
+    // visible consequence at all, so without a spoken confirmation a screen
+    // reader user cannot tell whether it worked.
+    if (announcer) announcer.textContent = app.announce;
+    paint();
+  },
+
+  // --- lobby (owner-gated in the engine, never here) ----------------------
+  setConfig(patch) { dispatch({ type: 'setConfig', patch }); },
+
+  applyPreset(id) {
+    const preset = PRESETS.find((p) => p.id === id);
+    if (preset) dispatch({ type: 'setConfig', patch: { ...preset.config } });
+  },
+
+  addBot() { dispatch({ type: 'addBot' }); },
+  removeSeat(seat) { dispatch({ type: 'removeSeat', seat }); },
+  startMatch() { dispatch({ type: 'startMatch' }); },
+  nextDeal() { dispatch({ type: 'nextDeal' }); },
+
+  newMatch() {
+    // Host-only by construction: reset() is not a wire intent. A client's
+    // "new match" button is a request to leave and is drawn as one.
+    if (!app.isHost || !engine) { intents.goHome(); return; }
+
+    // The table is kept and the scores are not. HUMANS FIRST, so an owner is
+    // re-established before anything owner-gated runs, and ONLY PEOPLE WHO ARE
+    // STILL HERE — a seat for somebody who left would block the start. The
+    // bots need no re-seating: startMatch() fills every empty chair, so they
+    // come back on the next START by themselves.
+    const humans = engine.seats.filter((s) => !s.isBot && s.connected).map((s) => ({ ...s }));
+    engine.reset();
+    for (const s of humans) engine.addPlayer(s.id, s.name, { clientId: s.clientId, isOwner: s.isOwner });
+    if (bots) bots.reset();
+    push();
+  },
+
+  // --- the auction ---------------------------------------------------------
+  selectBid(bid) { app.selectedBid = bid; app.error = null; paint(); },
+  placeBid(bid) { dispatch({ type: 'placeBid', bid }); },
+  passBid() { dispatch({ type: 'passBid' }); },
+
+  // --- trump ----------------------------------------------------------------
+  // A CARD, never a suit: the bidder hands over the card to put face down and
+  // the host reads the suit off it. See the header of js/guards.js.
+  chooseTrump(code) { dispatch({ type: 'chooseTrump', code }); },
+  chooseSeventh() { dispatch({ type: 'chooseSeventh' }); },
+
+  // --- declarations -----------------------------------------------------------
+  // One entry point for the window's buttons, four wire intents — each its
+  // own type, so a switched-off toggle's intent is a whole message the engine
+  // refuses rather than a field it has to remember to check.
+  declare(call) {
+    if (call === 'single') dispatch({ type: 'singleHand' });
+    else if (call === 'double') dispatch({ type: 'double' });
+    else if (call === 'redouble') dispatch({ type: 'redouble' });
+    else dispatch({ type: 'passDeclare' });
+  },
+
+  // --- play -------------------------------------------------------------------
+  selectCard(code) { app.selected = code; app.error = null; paint(); },
+  playCard(code) { dispatch({ type: 'playCard', code }); },
+  // The call is its own intent, not a flag on a card: calling turns the
+  // trump up and narrows the caller's hand BEFORE they choose what to play.
+  callTrump() { app.selected = null; dispatch({ type: 'callTrump' }); },
+  declarePair() { dispatch({ type: 'declarePair' }); },
+
+  // --- local-only view state ---------------------------------------------
+  togglePad() { app.showPad = !app.showPad; paint(); },
+  toggleLog() { app.showLog = !app.showLog; paint(); },
+  // The "are you sure" in front of leaveGame(), and nothing more than that:
+  // opening it leaves nothing, and closing it is how you stay.
+  toggleLeave() { app.showLeave = !app.showLeave; paint(); },
+
+  toggleRules() {
+    // The rules sheet is a NATIVE <dialog> living beside #app in index.html,
+    // not a node this app renders. Two reasons. It is static prose, so
+    // rebuilding it on every frame is waste; and <dialog> brings its own focus
+    // trap, Escape handling and inertness for the content behind it, all of
+    // which would otherwise be hand-written accessibility code that is easy to
+    // get subtly wrong. See the note in index.html.
+    if (!rulesDialog) return;
+    if (rulesDialog.open) rulesDialog.close();
+    else rulesDialog.showModal();
+  },
+
+  explain(reason) {
+    // A greyed card or an unavailable bid, tapped. The engine already phrased
+    // the reason; this just surfaces it rather than letting the tap do nothing.
+    app.error = reason;
+    paint();
+  },
+
+  dismissNetWarning() { app.netWarning = null; paint(); },
+};
+
+/** The one thing that can be missing while everything else works. */
+function requirePeer() {
+  if (peerAvailable()) return true;
+  app.screen = 'error';
+  app.error = 'The connection library did not load. Check your internet connection and reload the page.';
+  paint();
+  return false;
+}
+
+// ###########################################################################
+//
+//  BOOT
+//
+// ###########################################################################
+
+/**
+ * The room code in `?watch=CODE`, or null.
+ *
+ * THE WHOLE SPECTATOR ENTRY POINT IS A QUERY PARAMETER ON index.html, not a
+ * second page, and that is not a preference. sw.js answers every navigation
+ * out of the cached shell, so a watch.html added to this repo would be served
+ * index.html by the service worker on any device that had ever loaded the app
+ * — working perfectly in development and silently showing the wrong page in
+ * production, which is the worst failure mode available.
+ *
+ * Read through URL rather than URLSearchParams on location.search directly so
+ * that a file:// open, where search is empty and nothing should happen, and a
+ * GitHub Pages subpath, where the origin is not the root, both behave. Wrapped
+ * because a malformed URL throws, and a thrown boot is a blank page.
+ */
+function watchParam() {
+  try {
+    const code = new URL(window.location.href).searchParams.get('watch');
+    return code === null ? null : normalizeCode(code);
+  } catch (_) { return null; }
+}
+
+/** Take ?watch= back out of the address bar without navigating. Best-effort:
+ *  replaceState is unavailable on file:// and throws on some embedded
+ *  browsers, and the cost of it failing is a stale query string, which is not
+ *  worth a blank page. */
+function forgetWatchParam() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('watch')) return;
+    url.searchParams.delete('watch');
+    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+  } catch (_) { /* the address bar keeps a parameter nothing will read again */ }
+}
+
+/**
+ * Pick up where this device left off, if it left off recently enough.
+ *
+ * loadSession() applies the eight-hour TTL, so anything it hands back is worth
+ * acting on. The host branch is the one that matters: its device holds the
+ * only copy of the game, and resuming it is the difference between a reload
+ * and an abandoned match.
+ */
+function resume() {
+  const session = loadSession();
+  if (!session || !session.code) return false;
+  // A TABLE THE PLAYER WALKED AWAY FROM IS NOT RESUMED, IT IS OFFERED. They
+  // pressed LEAVE; a reload — or simply opening the app again an hour later —
+  // must not undo that for them. The home screen draws the offer from
+  // app.left, which is set just ahead of this function's only call.
+  if (session.left === true) return false;
+  if (!peerAvailable()) return false;
+
+  if (session.name && !app.me.name) app.me.name = session.name;
+
+  if (session.role === 'host') {
+    const snap = loadEngineSnapshot();
+    // A session without a snapshot rehydrates an empty lobby, which is worse
+    // than the home screen: it looks like a room that people can join and
+    // there is nothing in it. Only resume a host that has a game to resume.
+    if (!snap) { clearSession(); return false; }
+    beginHost(session.code, snap);
+    return true;
+  }
+
+  if (session.role === 'client') {
+    beginJoin(session.code);
+    return true;
+  }
+
+  return false;
+}
+
+// A host leaving takes the game with it, so say so. `beforeunload` with a
+// returnValue is the only hook browsers still honour for this, and they only
+// honour it when the player has interacted with the page — which, by the time
+// a match is running, they have.
+window.addEventListener('beforeunload', (e) => {
+  if (!app.isHost || !engine || engine.phase === PHASES.LOBBY) return;
+  // Flush synchronously. The debounced write may have up to three seconds of
+  // moves pending, and this is the last moment anything can be saved.
+  if (snapshotTimer !== null) { clearTimeout(snapshotTimer); snapshotTimer = null; }
+  saveEngineSnapshot(engine.serialize());
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+// THE URL BEATS THE STORED SESSION, and the order is the point.
+//
+// A device that has played here before still has a session record, and
+// loadSession()'s eight-hour TTL means it is usually still live. Ask resume()
+// first and a phone that was handed a ?watch= link would rejoin its own old
+// table instead — taking a seat, holding a hand, and being waited on — while
+// the link that was just followed does nothing at all. The URL is the more
+// recent and more explicit statement of intent, so it goes first.
+//
+// requirePeer() is inside dialRoom, and a four-character code is checked
+// there too, so a hand-edited `?watch=nonsense` lands on the home screen
+// with a sentence rather than on a spinner.
+//
+// The parked table is read BEFORE either, because it belongs to neither: it is
+// not acted on at boot at all, only shown, and it has to be in `app` by the
+// time whichever of the two paths below first paints the home screen.
+app.left = leftTable();
+
+const watchCode = watchParam();
+if (watchCode) intents.watch(watchCode);
+else if (!resume()) paint();

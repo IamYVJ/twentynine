@@ -1,0 +1,741 @@
+/* ==========================================================================
+   twentynine — the whole stylesheet.
+
+   One file, no build step, no preprocessor, loaded with a relative path so it
+   survives a GitHub Pages subpath. Same token names and structure as
+   judgement's, so a reader of one can read the other.
+
+   The game sections are lifted from the checkpoint-7 sketches (_sketch.html
+   and _tvsketch.html), which were approved as drawn: the trump indicator and
+   the call, the team strip, the scoreboard, and the TV.
+
+   EVERY CLASS HERE IS EMITTED SOMEWHERE AND EVERY CLASS EMITTED IS HERE.
+   scripts/test-engine.mjs renders every screen of thousands of deals, reads
+   the classList off every node, and fails on a rule that matches nothing as
+   much as on a class with no rule.
+   ========================================================================== */
+
+:root {
+  /* ONE ACCENT: felt green, the gap between the golds (~42°) and avalon's
+     mint (~157°). --bg is tinted toward it the way judgement's #120711 is
+     tinted toward its magenta — same lightness and saturation, new hue. */
+  --bg:        #0C1207;
+  --bg-glow:   #192A0D;
+  --surface:   #121A0C;
+  --surface-2: #1A2412;
+  --border:      rgba(139, 212, 80, 0.24);
+  --border-soft: rgba(255, 255, 255, 0.07);
+  --accent:     #8BD450;
+  --accent-ink: #111D07;
+  --accent-dim: rgba(139, 212, 80, 0.13);
+  --text:      #F3F5EF;
+  --muted:     #9CA894;
+  --warn:      #FF8A6B;
+  --warn-dim:  rgba(255, 138, 107, 0.14);
+
+  /* THE OTHER TEAM IS IVORY, NOT A SECOND HUE. "One accent only" — so "us" is
+     the accent and "them" is the card colour, which every screen already
+     carries. courtpiece spends a second hue on this; this repo may not. */
+  --them:      #E9E2D0;
+  --them-dim:  rgba(233, 226, 208, 0.09);
+
+  --card:      #EDE6D6;
+  --card-2:    #DCD3BF;
+  --card-ink:  #23282C;
+  --card-red:  #B03A2E;
+
+  --radius:    14px;
+  --maxw:      640px;
+
+  --card-w:    44px;
+  --card-h:    62px;
+
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: 'Playfair Display', Georgia, serif;
+  --sans: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* ==========================================================================
+   BASE
+   ========================================================================== */
+
+* { box-sizing: border-box; }
+html { height: 100%; }
+
+/* Body is the column, so the footer and #announce — siblings of #app, which
+   render() wipes — sit under it rather than inside it. */
+body {
+  margin: 0;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(120% 60% at 50% -10%, var(--bg-glow) 0%, var(--bg) 55%) fixed;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+}
+
+#app { display: flex; flex-direction: column; flex: 1 0 auto; }
+
+button { font: inherit; color: inherit; cursor: pointer; }
+button:disabled { cursor: default; opacity: 0.4; }
+input { font: inherit; color: inherit; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* Screen-reader-only — never display:none, which silences a live region. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* ==========================================================================
+   SHELL AND CHROME
+   ========================================================================== */
+
+.shell {
+  flex: 1 1 auto; width: 100%; max-width: var(--maxw); margin: 0 auto;
+  display: flex; flex-direction: column; gap: 16px;
+  padding:
+    calc(20px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+    calc(20px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+}
+/* The play screens: the strip pinned to the top, the dock to the bottom, the
+   table between them. */
+.shell-play { padding: 0; gap: 0; height: 100dvh; }
+
+.wordmark { display: flex; align-items: center; gap: 9px; }
+.wordmark-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 14px var(--accent); flex: none; }
+.wordmark-text { font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: 0.22em; }
+.help-btn {
+  margin-left: auto; flex: none; width: 30px; height: 30px; border-radius: 50%;
+  border: 1px solid var(--border); background: transparent; color: var(--accent);
+  font-family: var(--mono); font-weight: 700; font-size: 13px; line-height: 1; padding: 0;
+}
+/* In the strip the help button sits in a 10px row and takes no auto margin —
+   the trump chip already carries the push. */
+.help-btn-sm { margin-left: 0; width: 22px; height: 22px; font-size: 11px; }
+
+.tagline { font-family: var(--serif); font-style: italic; font-size: 17px; line-height: 1.4; color: var(--muted); margin: 0; }
+
+.panel {
+  background: var(--surface); border: 1px solid var(--border-soft); border-radius: var(--radius);
+  padding: 18px 16px; display: flex; flex-direction: column; gap: 14px;
+}
+.panel h2 { font-family: var(--serif); font-size: 21px; font-weight: 700; margin: 0; line-height: 1.2; }
+.panel p { margin: 0; font-size: 14px; line-height: 1.55; color: var(--muted); }
+.panel-centre { align-items: center; text-align: center; }
+.hint { font-size: 12.5px; line-height: 1.5; color: var(--muted); margin: 0; }
+
+.error-note {
+  margin: 0 12px; font-size: 13px; line-height: 1.5; color: var(--warn); background: var(--warn-dim);
+  border: 1px solid rgba(255, 138, 107, 0.3); border-radius: 10px; padding: 11px 13px;
+}
+.shell > .error-note { margin: 0; }
+
+.field {
+  width: 100%; padding: 14px; border-radius: 10px; border: 1px solid var(--border-soft);
+  background: var(--bg); color: var(--text);
+  /* 16px minimum, or iOS zooms the page on focus and never zooms back. */
+  font-size: 16px;
+}
+.field::placeholder { color: var(--muted); opacity: 0.7; }
+.field:focus { outline: none; border-color: var(--accent); }
+.field-code {
+  font-family: var(--mono); font-weight: 700; font-size: 34px; letter-spacing: 0.34em;
+  text-align: center; text-indent: 0.34em; padding: 18px 14px;
+}
+
+.btn-row { display: flex; gap: 9px; flex-wrap: wrap; }
+.btn {
+  font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 13px 14px; border-radius: 10px;
+  border: 1px solid var(--border); background: transparent; color: var(--accent); flex: 1; min-height: 44px;
+}
+.btn-primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn-secondary { background: var(--surface-2); color: var(--text); border-color: var(--border-soft); }
+.btn-ghost { color: var(--muted); border-color: var(--border-soft); flex: 0 1 auto; }
+.btn-wide { flex: 1 1 100%; width: 100%; }
+
+.panel-code { align-items: center; gap: 8px; text-align: center; }
+.code-lede { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.panel-code .code {
+  font-family: var(--mono); font-weight: 700; font-size: 40px; letter-spacing: 0.2em;
+  color: var(--accent); text-indent: 0.2em; line-height: 1.1; user-select: all;
+}
+
+.spinner, .spinner-sm {
+  display: inline-block; flex: none; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--accent); animation: spin 0.9s linear infinite;
+}
+.spinner { width: 26px; height: 26px; }
+.spinner-sm { width: 13px; height: 13px; border-width: 1.5px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ==========================================================================
+   TEAMS — one custom property, set per point of view
+   "us" and "them" are relative to whoever holds the phone, so every
+   team-coloured rule reads var(--team) and the renderer sets which.
+   ========================================================================== */
+
+.us   { --team: var(--accent); --team-dim: var(--accent-dim); }
+.them { --team: var(--them);   --team-dim: var(--them-dim); }
+
+/* ==========================================================================
+   THE LOBBY
+   ========================================================================== */
+
+.seat-list { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.seat-row {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--border-soft); border-left: 3px solid var(--team); border-radius: 10px; background: var(--surface-2);
+}
+.seat-row.open { opacity: 0.55; border-style: dashed; border-left-style: solid; }
+.seat-no { font-family: var(--mono); font-size: 10px; color: var(--muted); width: 15px; flex: none; }
+.seat-row-name { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
+.seat-row.me .seat-row-name { color: var(--accent); font-weight: 700; }
+.seat-row.gone .seat-row-name { text-decoration: line-through; color: var(--muted); }
+
+.tag {
+  font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 3px 6px; border-radius: 4px; border: 1px solid var(--border-soft); color: var(--muted); flex: none; white-space: nowrap;
+}
+.tag-owner, .tag-hot { color: var(--accent); border-color: var(--border); }
+.tag-bot { color: var(--muted); }
+.tag-gone, .tag-warn { color: var(--warn); border-color: rgba(255, 138, 107, 0.35); }
+
+.seat-kick {
+  flex: none; width: 30px; height: 30px; padding: 0; border-radius: 8px;
+  border: 1px solid var(--border-soft); background: transparent; color: var(--muted); font-size: 13px; line-height: 1;
+}
+
+.preset-row { display: flex; gap: 7px; flex-wrap: wrap; }
+.preset {
+  flex: 1 1 auto; font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; padding: 10px 9px; border-radius: 9px;
+  border: 1px solid var(--border-soft); background: var(--surface-2); color: var(--muted); min-height: 40px;
+}
+.preset.on { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+
+.axis { display: flex; flex-direction: column; gap: 6px; }
+.toggle {
+  display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--text);
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border-soft); background: var(--surface-2);
+  width: 100%; text-align: left; min-height: 44px;
+}
+.toggle-name { font-weight: 600; }
+.toggle-state { margin-left: auto; font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.12em; color: var(--muted); }
+.toggle.on { border-color: var(--accent); }
+.toggle.on .toggle-state { color: var(--accent); }
+
+/* ==========================================================================
+   CARDS — ivory faces on dark felt, judgement's treatment
+   ========================================================================== */
+
+.card {
+  width: var(--card-w); height: var(--card-h); flex: none; position: relative;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  border-radius: 8px; border: 1px solid rgba(0, 0, 0, 0.3);
+  background: linear-gradient(170deg, var(--card), var(--card-2)); color: var(--card-ink);
+}
+.card.red { color: var(--card-red); }
+.card-rank { font-family: var(--mono); font-weight: 700; font-size: 18px; line-height: 1; }
+.card-suit { font-size: 15px; line-height: 1; }
+/* A card face down: the indicator, before the reveal. It carries no text. */
+.card-back {
+  background: repeating-linear-gradient(45deg, #2A3A1C 0 5px, #1D2914 5px 10px);
+  border: 1px solid var(--border);
+}
+.card.card-mini { width: 22px; height: 31px; border-radius: 4px; gap: 0; }
+.card-mini .card-rank { font-size: 10px; }
+.card-mini .card-suit { font-size: 9px; }
+.card-back.card-mini { box-shadow: 0 0 0 1px var(--accent); }
+/* PLAYED AS A TRUMP — after the reveal, and of the trump suit. A trump-suit
+   card played before the reveal was a plain card and does not get the mark,
+   because the rule says its role was fixed when it hit the table. */
+.card.as-trump::after {
+  content: 'T'; position: absolute; bottom: -7px; left: 50%; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 8px; font-weight: 700; line-height: 1;
+  background: var(--accent); color: var(--accent-ink); border-radius: 3px; padding: 1px 3px;
+}
+
+/* ==========================================================================
+   THE STRIP — teams, not individuals
+   ========================================================================== */
+
+.play-strip {
+  flex: none; background: var(--surface); border-bottom: 1px solid var(--border-soft);
+  padding: calc(10px + env(safe-area-inset-top)) 12px 9px; display: flex; flex-direction: column; gap: 8px;
+}
+.strip-head {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+}
+.trump-chip { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; color: var(--text); white-space: nowrap; }
+.trump-chip b { font-weight: 700; }
+.trump-glyph { font-size: 14px; line-height: 1; }
+.trump-chip.red .trump-glyph { color: #FF6B6B; }
+.strip-btn {
+  flex: none; font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--accent); background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 4px 5px;
+}
+.strip-pad-btn { margin-left: 0; }
+.strip-exit { color: var(--muted); border-color: var(--border-soft); }
+
+.contract { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.contract-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.contract-bid { font-family: var(--serif); font-size: 22px; line-height: 1; white-space: nowrap; }
+.contract-bid s { color: var(--muted); font-size: 15px; }
+.contract-by {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tags { display: flex; gap: 5px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+
+.meter-wrap { display: flex; flex-direction: column; gap: 4px; }
+.meter-line { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em; color: var(--muted); }
+.meter-line b { color: var(--text); }
+.meter { height: 8px; border-radius: 4px; background: var(--surface-2); position: relative; overflow: hidden; }
+.meter-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--team, var(--accent)); }
+.meter-tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); }
+
+.teams { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
+.team {
+  border: 1px solid var(--border-soft); border-left: 3px solid var(--team); border-radius: 9px;
+  padding: 6px 8px; background: var(--team-dim); min-width: 0;
+}
+.team-top { display: flex; align-items: baseline; gap: 6px; }
+.team-label { font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--team); white-space: nowrap; }
+.team-gp { margin-left: auto; font-family: var(--mono); font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+.team-gp.neg, .track-gp.neg { color: var(--warn); }
+.team-names { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.team-pts { font-family: var(--mono); font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ==========================================================================
+   THE TABLE — four plates, partner opposite (courtpiece's layout)
+   ========================================================================== */
+
+.table {
+  /* A floor of one row of cards. Below it the felt would vanish, and the
+     trick is the thing the call is being decided about; past it the page
+     scrolls, and every control stays reachable. */
+  flex: 1 1 0; min-height: 72px; overflow: hidden;
+  /* A SIZE CONTAINER, so the trick can be sized to what is left of the
+     screen once the strip and the dock have theirs. See the @container rules
+     under .trick-grid for what it gives up, and in which order.
+     THE FLEX BASIS IS 0, NOT auto, AND THAT IS LOAD-BEARING. Size containment
+     makes the content height zero, and Chromium resolves cqh — and every
+     @container (max-height) — against a definite height only. Grown from an
+     auto basis the felt LAYS OUT at its full height while cqh reads 0: every
+     query below matched at every size and the plates were hidden on a 1080p
+     screen. From a 0 basis in the 100dvh column the grown height is definite.
+     The suite holds every size container to this. */
+  container-type: size;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-rows: auto 1fr auto; align-items: center; justify-items: center; gap: 4px; padding: 8px;
+}
+.plate {
+  position: relative; max-width: 100%; min-width: 0; text-align: center;
+  border: 1px solid var(--border-soft); border-bottom: 2px solid var(--team); border-radius: 10px;
+  padding: 5px 8px; background: var(--surface);
+}
+.plate.turn { box-shadow: 0 0 0 2px var(--accent); }
+.plate.gone { opacity: 0.5; }
+.plate.out { opacity: 0.45; border-style: dashed; }
+.plate-name {
+  display: block; font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.plate-meta { display: block; font-family: var(--mono); font-size: 8.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plate.top { grid-column: 2; grid-row: 1; }
+.plate.left { grid-column: 1; grid-row: 2; justify-self: start; }
+.plate.right { grid-column: 3; grid-row: 2; justify-self: end; }
+.plate.bottom { grid-column: 2; grid-row: 3; }
+/* The indicator BESIDE the bidder's plate, on the side facing the middle of
+   the table, as the sketch drew it: absolutely placed, so it never widens a
+   plate in a three-column row on a 320px phone, and outside the plate, so it
+   never sits on the plate's own text. */
+.ind { position: absolute; top: 50%; transform: translateY(-50%); left: calc(100% + 4px); display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.plate.right .ind { left: auto; right: calc(100% + 4px); }
+.ind-label { font-family: var(--mono); font-size: 7px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); background: var(--bg); border-radius: 3px; padding: 0 2px; }
+
+.trick-grid {
+  grid-column: 2; grid-row: 2; width: 100%; height: 100%; min-height: 0;
+  display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr 1fr; place-items: center;
+  /* The played card is a third of what the two plates (36px each) and the
+     two row gaps leave of the felt's content box: 42px at 320x568, its full
+     54px on anything roomier. cqh is the CONTENT box — padding excluded. */
+  --played-h: clamp(28px, calc((100cqh - 80px) / 3), 54px);
+}
+/* A SHORT FELT gives way in stages rather than clipping. The dock is what
+   takes the height — the call, explained, with the bidder's peek, on a 568px
+   phone leaves the felt nothing but its floor — and the dock is the part being
+   acted on. First the plates go: the strip names every seat and the dock's
+   own line names who is winning the trick. Then the trick folds to one row,
+   numbered by its pips. The thresholds are where each stage stops fitting at
+   28px cards; container sizes are the CONTENT box, as cqh is. */
+@container (max-height: 163px) {
+  .table > .plate { display: none; }
+  .trick-grid { grid-row: 1 / -1; --played-h: clamp(28px, calc((100cqh - 8px) / 3), 54px); }
+}
+@container (max-height: 91px) {
+  .trick-grid { display: flex; align-items: center; justify-content: center; gap: 10px; --played-h: clamp(20px, calc(100cqh - 8px), 54px); }
+  .trick-grid > .slot:empty { display: none; }
+}
+.slot.top { grid-column: 2; grid-row: 1; }
+.slot.left { grid-column: 1; grid-row: 2; }
+.slot.right { grid-column: 3; grid-row: 2; }
+.slot.bottom { grid-column: 2; grid-row: 3; }
+.played { position: relative; display: block; }
+.played .card { height: var(--played-h); width: auto; aspect-ratio: 38 / 54; }
+.played .card-rank { font-size: calc(var(--played-h) / 3); }
+.played .card-suit { font-size: calc(var(--played-h) / 3.6); }
+.played.winning .card { box-shadow: 0 0 0 2px var(--team), 0 6px 16px -8px var(--team); }
+.pip {
+  position: absolute; top: -6px; right: -6px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--surface-2); color: var(--muted); border: 1px solid var(--border-soft);
+  font-family: var(--mono); font-size: 8px; display: flex; align-items: center; justify-content: center;
+}
+
+.reveal-banner {
+  flex: none; margin: 8px 12px 0; border-radius: 10px; padding: 8px 10px;
+  background: var(--accent-dim); border: 1px solid var(--accent); font-size: 12px; line-height: 1.4;
+  display: flex; align-items: center; gap: 8px;
+}
+
+/* ==========================================================================
+   THE DOCK — the hand, the call, the action
+   ========================================================================== */
+
+.hand-dock {
+  flex: none; padding: 9px 12px calc(12px + env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--bg) 55%, rgba(12, 18, 7, 0.85));
+  border-top: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 7px;
+}
+.turn-hint { font-family: var(--mono); font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.turn-hint.mine { color: var(--accent); }
+.why { margin: 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.peek {
+  display: flex; gap: 8px; align-items: center; font-size: 11.5px; line-height: 1.4; color: var(--muted);
+  background: var(--surface); border: 1px dashed var(--border); border-radius: 10px; padding: 7px 10px;
+}
+.peek b { color: var(--accent); }
+
+/* EIGHT CARDS ON ONE ROW AT 320px. 296px of dock: eight faces at 10.4vw
+   (33.3px at 320) plus seven gaps is 289px. The rank is two monospace glyphs
+   at most ("10"), 15px each at 0.6em, which fits a 33px face. */
+.hand { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px clamp(2px, 1vw, 6px); min-width: 0; }
+.hand .card { width: clamp(31px, 10.4vw, 54px); height: auto; aspect-ratio: 44 / 62; }
+.hand .card-rank { font-size: clamp(14px, 4.4vw, 19px); }
+.hand.out { opacity: 0.4; }
+.card-btn { padding: 0; border: none; background: none; flex: none; display: flex; justify-content: center; }
+.card-btn.static { cursor: default; }
+.card-btn.sel .card { transform: translateY(-8px); box-shadow: 0 0 0 2px var(--accent), 0 10px 20px -8px rgba(0, 0, 0, 0.7); }
+.card-btn.illegal .card { opacity: 0.3; filter: saturate(0.35); }
+/* The fan: only for looking at, so the cards may overlap. */
+.hand.fan { flex-wrap: nowrap; gap: 0; }
+.hand.fan .card-btn { flex: 0 1 var(--card-w); min-width: 0; justify-content: flex-start; }
+.hand.fan .card-btn:last-child { flex: 0 0 var(--card-w); }
+.hand.fan .card { width: var(--card-w); height: var(--card-h); aspect-ratio: auto; box-shadow: -3px 0 5px -1px rgba(0, 0, 0, 0.55); }
+
+.call-choice { display: flex; flex-direction: column; gap: 6px; }
+.choice-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.choice {
+  text-align: left; border-radius: 11px; padding: 9px 10px; border: 1px solid var(--border-soft);
+  background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; min-width: 0;
+}
+.choice b { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text); }
+.choice span { font-size: 11px; line-height: 1.35; color: var(--muted); }
+.choice.primary { border-color: var(--accent); background: var(--accent-dim); }
+.choice.primary b { color: var(--accent); }
+.pair-btn { flex: none; }
+
+.action-row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+.action-row .hint { flex: 1 1 100%; }
+
+/* ==========================================================================
+   THE MIDDLE BAND — the deal, the auction, trump, declarations
+   ========================================================================== */
+
+.interstitial, .bid-wrap {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; justify-content: safe center; gap: 13px; padding: 18px 14px;
+}
+.interstitial { align-items: center; text-align: center; }
+.inter-big { font-family: var(--serif); font-size: 27px; margin: 0; line-height: 1.2; }
+.inter-sub { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0; line-height: 1.7; }
+.bid-lede { font-family: var(--serif); font-size: 21px; margin: 0; line-height: 1.25; }
+.bid-meta { font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; color: var(--muted); margin: 0; line-height: 1.7; }
+.bid-pad, .declare { display: flex; flex-direction: column; gap: 12px; }
+.bid-grid { display: flex; flex-wrap: wrap; gap: 7px; }
+.bid-btn {
+  width: 48px; height: 48px; border-radius: 10px; font-family: var(--mono); font-weight: 700; font-size: 16px;
+  background: var(--surface-2); border: 1px solid var(--border-soft); color: var(--text);
+}
+.bid-btn.sel { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.calls { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.call {
+  display: flex; gap: 6px; align-items: baseline; padding: 5px 8px; border-radius: 8px;
+  border: 1px solid var(--border-soft); border-left: 3px solid var(--team); background: var(--surface); min-width: 0;
+}
+.call.passed { opacity: 0.55; }
+.call-name { font-size: 11.5px; max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.call-bid { font-family: var(--mono); font-weight: 700; font-size: 12px; }
+.trump-pick { justify-content: flex-start; }
+.trump-pick .card { width: 48px; height: 68px; }
+
+/* ==========================================================================
+   DEAL OVER, MATCH OVER, AND THE SCOREBOARD
+   ========================================================================== */
+
+.over-head { display: flex; align-items: flex-start; gap: 10px; }
+.over-title { flex: 1 1 auto; min-width: 0; }
+.over-head h2 { font-family: var(--serif); font-size: 23px; margin: 0 0 4px; line-height: 1.2; overflow-wrap: anywhere; }
+.over-head p { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 0; }
+
+.result.made { border-color: var(--border); background: var(--accent-dim); }
+.result.missed { border-color: rgba(255, 138, 107, 0.3); }
+.result-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.result-list li { display: flex; gap: 10px; font-size: 13px; }
+.result-k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); width: 92px; flex: none; padding-top: 2px; }
+.result-v { min-width: 0; overflow-wrap: anywhere; }
+.panel .result-delta { font-family: var(--mono); font-weight: 700; font-size: 18px; color: var(--text); overflow-wrap: anywhere; }
+.result.made .result-delta { color: var(--accent); }
+.result.missed .result-delta { color: var(--warn); }
+
+/* THE −6 … +6 SCALE. Zero in the middle, the finish lines at the ends; the
+   fill grows right in the team's colour, left in the warning colour. */
+.tracks { display: flex; flex-direction: column; gap: 12px; }
+.track { display: flex; flex-direction: column; gap: 5px; }
+.track-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.track-name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.track-gp { margin-left: auto; font-family: var(--mono); font-weight: 700; font-size: 22px; color: var(--team); flex: none; }
+.scale { position: relative; height: 14px; }
+.scale-axis { position: absolute; left: 0; right: 0; top: 5px; height: 4px; border-radius: 2px; background: var(--surface-2); }
+.scale-fill { position: absolute; top: 3px; height: 8px; border-radius: 4px; background: var(--team); }
+.scale-fill.neg { background: var(--warn); }
+.scale-zero { position: absolute; left: 50%; top: 0; width: 2px; height: 14px; margin-left: -1px; background: var(--muted); }
+.scale-ends { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+.scale-ends .lose, .tv-ends .lose { color: var(--warn); }
+.scale-ends .win, .tv-ends .win { color: var(--accent); }
+
+table.hist { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 10.5px; font-variant-numeric: tabular-nums; table-layout: fixed; }
+.hist th { font-size: 8.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 500; text-align: left; padding: 0 3px 6px; border-bottom: 1px solid var(--border); }
+.hist td { padding: 7px 3px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hist th:first-child, .hist td:first-child { width: 22px; color: var(--muted); }
+.hist .sw { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: var(--team); }
+.hist td.made { color: var(--accent); font-weight: 700; }
+.hist td.missed { color: var(--warn); font-weight: 700; }
+.hist tr.thrown td { color: #6F7A69; font-style: italic; }
+
+/* ==========================================================================
+   OVERLAYS
+   ========================================================================== */
+
+.sheet { position: fixed; inset: 0; z-index: 40; background: rgba(4, 8, 2, 0.72); display: flex; align-items: flex-end; justify-content: center; }
+.sheet-inner {
+  position: relative; width: 100%; max-width: var(--maxw); max-height: 88dvh; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0;
+  padding: 16px 14px calc(18px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 12px;
+}
+.sheet-close {
+  position: absolute; top: 10px; right: 10px; z-index: 1; width: 34px; height: 34px; padding: 0;
+  border-radius: 50%; border: 1px solid var(--border-soft); background: var(--surface-2); color: var(--muted); font-size: 14px; line-height: 1;
+}
+.sheet-title, .leave-sheet h2 { font-family: var(--serif); font-size: 21px; font-weight: 700; margin: 0; line-height: 1.2; padding-right: 40px; }
+.leave-sheet p { margin: 0; font-size: 14px; line-height: 1.55; color: var(--muted); }
+
+.log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.log li { padding: 7px 2px 7px 9px; border-left: 2px solid transparent; border-bottom: 1px solid rgba(255, 255, 255, 0.045); font-size: 13px; line-height: 1.45; }
+.log li:last-child { border-bottom: none; }
+/* Every kind js/state.js's _say() writes, listed even where the rule is only
+   the inherited colour, so an eighteenth kind shows up here as an absence. */
+.log-deal    { border-left-color: var(--accent); color: var(--text); font-weight: 700; }
+.log-bid     { color: var(--text); }
+.log-pass    { color: var(--muted); }
+.log-thrown  { color: var(--warn); }
+.log-auction { color: var(--text); font-weight: 600; }
+.log-trump   { border-left-color: var(--border); color: var(--text); }
+.log-declare { color: var(--warn); }
+.log-reveal  { border-left-color: var(--accent); color: var(--accent); font-weight: 600; }
+.log-pair    { color: var(--accent); }
+.log-trick   { color: var(--text); }
+.log-made    { color: var(--accent); }
+.log-missed  { color: var(--warn); }
+.log-match   { border-left-color: var(--accent); color: var(--accent); font-weight: 700; }
+.log-join    { color: var(--accent); }
+.log-leave   { color: var(--muted); }
+.log-system  { color: var(--muted); font-style: italic; }
+
+/* ==========================================================================
+   BANNERS
+   ========================================================================== */
+
+.net-banner, .reconnect-banner {
+  position: fixed; z-index: 50; left: 50%; transform: translateX(-50%);
+  bottom: calc(12px + env(safe-area-inset-bottom)); width: calc(100% - 24px); max-width: calc(var(--maxw) - 24px);
+  display: flex; align-items: center; gap: 10px; padding: 12px 13px; border-radius: 11px;
+  font-size: 12.5px; line-height: 1.45; box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.8);
+}
+.net-banner { background: var(--surface-2); border: 1px solid rgba(255, 138, 107, 0.35); color: var(--warn); }
+.reconnect-banner { top: calc(12px + env(safe-area-inset-top)); bottom: auto; background: var(--surface-2); border: 1px solid var(--border); color: var(--accent); }
+.banner-close {
+  margin-left: auto; flex: none; width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border-soft); background: transparent; color: inherit; font-size: 11px; line-height: 1;
+}
+
+/* ==========================================================================
+   THE RULES SHEET — a native <dialog>, a sibling of #app
+   ========================================================================== */
+
+#rules {
+  width: calc(100% - 28px); max-width: var(--maxw); max-height: 84dvh; padding: 0;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text);
+  overflow: hidden; display: flex; flex-direction: column;
+}
+#rules:not([open]) { display: none; }
+#rules::backdrop { background: rgba(4, 8, 2, 0.74); }
+.rules-inner { padding: 18px 16px; overflow-y: auto; min-height: 0; }
+.rules-inner h2 { font-family: var(--serif); font-size: 21px; margin: 0 0 4px; }
+.rules-inner h3 { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin: 18px 0 6px; }
+.rules-inner p, .rules-inner li { font-size: 13.5px; line-height: 1.6; color: var(--muted); margin: 0 0 8px; }
+.rules-inner ul { margin: 0 0 8px; padding-left: 18px; }
+.rules-inner b { color: var(--text); font-weight: 600; }
+.rules-close-row { margin: 0; padding: 12px 16px calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border-soft); background: var(--surface); }
+
+/* ==========================================================================
+   FOOTER — a sibling of #app, hidden while a board is on screen
+   ========================================================================== */
+
+.site-footer {
+  flex: none; width: 100%; max-width: var(--maxw); margin: 0 auto;
+  padding: 18px 16px calc(20px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+  border-top: 1px solid var(--border-soft);
+}
+.site-footer .sep { opacity: 0.4; }
+.footer-reset {
+  margin-left: auto; font: inherit; letter-spacing: inherit; text-transform: inherit;
+  background: transparent; border: 1px solid var(--border-soft); border-radius: 7px; padding: 7px 9px; color: var(--muted);
+}
+/* Never a `display` here: any value beats [hidden], and the count must stay
+   hidden on every failure. */
+.visitor-counter { flex-basis: 100%; margin: 0; text-align: center; }
+.visitor-count { font-variant-numeric: tabular-nums; color: var(--text); }
+body.in-play .site-footer { display: none; }
+
+/* ==========================================================================
+   THE TV — the table seen from above, every size a container unit
+   Numbers from _tvsketch.html: zero overflow at 1920x1080 and 1366x768 with
+   four sixteen-character names; smallest type 21.6px and 15.4px.
+   ========================================================================== */
+
+.tv {
+  container-type: size; height: 100dvh; position: relative; flex: 1 1 auto; min-height: 0; width: 100%;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.tv * { cursor: default; user-select: none; }
+.tv-bar {
+  flex: none; display: flex; align-items: center; gap: 3cqw; padding: 1.6cqh 2.2cqw; padding-right: 14cqh;
+  border-bottom: 1px solid var(--border-soft); font-size: 3cqh; color: var(--muted);
+}
+.tv-bar b { color: var(--text); font-weight: 700; }
+.tv-trump { display: inline-flex; align-items: center; gap: 0.8cqw; }
+.tv-trump .trump-chip { margin-left: 0; gap: 0.6cqw; }
+.tv-trump .trump-glyph { font-size: 4.2cqh; }
+.card.tv-trumpcard { width: 4.4cqh; height: 6.2cqh; border-radius: 0.7cqh; border: 2px solid var(--accent); }
+.tv-code { margin-left: auto; font-family: var(--mono); font-weight: 700; font-size: 3.6cqh; letter-spacing: 0.18em; color: var(--accent); }
+
+.tv-main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 2cqw; padding: 2cqh 2.2cqw; }
+.tv-felt {
+  position: relative; min-height: 0; border-radius: 3cqh; border: 1px solid var(--border-soft);
+  background: radial-gradient(closest-side, rgba(139, 212, 80, 0.06), transparent);
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); grid-template-rows: auto 1fr auto;
+  align-items: center; justify-items: center; padding: 2cqh 1.5cqw;
+}
+.tv-seat {
+  position: relative; justify-self: stretch; min-width: 0; max-width: 100%;
+  display: flex; flex-direction: column; align-items: center; gap: 0.5cqh; padding: 1.2cqh 1.2cqw;
+  border-radius: 1.6cqh; background: var(--surface); border: 2px solid transparent; border-bottom: 0.6cqh solid var(--team);
+}
+/* WHOSE TURN, three ways over: border, fill and position — findable from
+   four metres on a badly calibrated panel. */
+.tv-seat.turn { border-color: var(--accent); background: var(--accent-dim); }
+.tv-seat.gone { opacity: 0.45; }
+.tv-seat.top { grid-column: 2; grid-row: 1; }
+.tv-seat.left { grid-column: 1; grid-row: 2; }
+.tv-seat.right { grid-column: 3; grid-row: 2; }
+.tv-seat.bottom { grid-column: 2; grid-row: 3; }
+.tv-nm { font-size: 2.8cqh; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-meta { font-family: var(--mono); font-size: 2.3cqh; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-ind { position: absolute; top: 50%; transform: translateY(-50%); left: calc(100% + 1.2cqw); display: flex; flex-direction: column; align-items: center; gap: 0.3cqh; }
+.tv-seat.right .tv-ind { left: auto; right: calc(100% + 1.2cqw); }
+.tv-ind .card { width: 4.4cqh; height: 6.2cqh; border-radius: 0.7cqh; }
+.tv-ind .ind-label { font-size: 2cqh; }
+.tv-trick { grid-column: 2; grid-row: 2; display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr 1fr; place-items: center; width: 100%; height: 100%; }
+.tv-slot.top { grid-column: 2; grid-row: 1; }
+.tv-slot.left { grid-column: 1; grid-row: 2; }
+.tv-slot.right { grid-column: 3; grid-row: 2; }
+.tv-slot.bottom { grid-column: 2; grid-row: 3; }
+.tv-slot .card { width: 9cqh; height: 12.8cqh; border-radius: 1.2cqh; box-shadow: 0 0.8cqh 2cqh rgba(0, 0, 0, 0.45); }
+.tv-slot .card-rank { font-size: 5cqh; }
+.tv-slot .card-suit { font-size: 3.8cqh; }
+.tv-slot .card.win { box-shadow: 0 0 0 0.5cqh var(--team), 0 0.8cqh 2cqh rgba(0, 0, 0, 0.45); }
+.tv-slot .card.as-trump::after { font-size: 2cqh; bottom: -1.4cqh; }
+
+.tv-side { min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 2.2cqh; }
+.tv-box { background: var(--surface); border: 1px solid var(--border-soft); border-radius: 2cqh; padding: 2cqh 1.6cqw; display: flex; flex-direction: column; gap: 1.2cqh; min-width: 0; }
+.tv-k { font-family: var(--mono); font-size: 2.3cqh; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-big { font-family: var(--serif); font-size: 6.4cqh; line-height: 1; }
+.tv-big s { color: var(--muted); font-size: 4cqh; }
+.tv-tags { display: flex; gap: 0.8cqw; flex-wrap: wrap; }
+.tv-tags .tag { font-size: 2.3cqh; padding: 0.5cqh 0.7cqw; border-radius: 0.8cqh; }
+.tv-drama { font-family: var(--mono); font-size: 3.4cqh; display: flex; justify-content: space-between; color: var(--muted); }
+.tv-drama b { color: var(--team, var(--accent)); }
+.tv-box .meter { height: 1.4cqh; border-radius: 0.7cqh; }
+.tv-track { display: flex; flex-direction: column; gap: 0.8cqh; }
+.tv-track .track-name { font-size: 2.6cqh; }
+.tv-track .track-gp { font-size: 4.6cqh; }
+.tv-track .scale { height: 3.2cqh; }
+.tv-track .scale-axis { top: 1.2cqh; height: 0.8cqh; }
+.tv-track .scale-fill { top: 0.9cqh; height: 1.4cqh; }
+.tv-track .scale-zero { height: 3.2cqh; width: 0.3cqh; }
+.tv-ends { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 2.3cqh; color: var(--muted); }
+.tv-lede { margin: 0; font-size: 3.4cqh; color: var(--muted); text-align: center; }
+
+.tv-lobby, .tv-wait {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3cqh; padding: 2cqh 4cqw;
+}
+.tv-wait p { margin: 0; font-size: 3cqh; color: var(--muted); }
+.tv-bigcode { font-family: var(--mono); font-weight: 700; font-size: 18cqh; line-height: 1; letter-spacing: 0.14em; color: var(--accent); }
+.tv-teams { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2cqw; align-self: stretch; }
+.tv-team { border-radius: 2cqh; padding: 2cqh 1.6cqw; background: var(--team-dim); border-left: 0.6cqh solid var(--team); display: flex; flex-direction: column; gap: 1cqh; min-width: 0; }
+.tv-tname { font-size: 3.4cqh; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The only two controls, dimmed into a corner: the device showing this is
+   often the phone that pressed WATCH. */
+.tv-chrome { position: absolute; top: 0; right: 0; display: flex; align-items: center; }
+.tv-exit, .tv-help {
+  width: 6cqh; height: 6cqh; display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none; color: var(--muted); opacity: 0.25; font-size: 2.6cqh; padding: 0;
+}
+.tv-help { border-radius: 50%; }
+.tv-exit:hover, .tv-exit:focus-visible, .tv-help:hover, .tv-help:focus-visible { opacity: 1; }
+
+/* ==========================================================================
+   MOTION
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important;
+  }
+  .spinner, .spinner-sm { animation-duration: 2.2s !important; animation-iteration-count: infinite !important; }
+  .card-btn.sel .card { transform: none; }
+}

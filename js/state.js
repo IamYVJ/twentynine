@@ -1054,6 +1054,9 @@ export class GameEngine {
       trump: this.revealed && !this.single ? this.trumpSuit : null,
       revealed: this.revealed,
       revealedBy: this.revealedBy,
+      // Which trick the reveal happened in, so a screen can say "called this
+      // trick" and a TV can mark the moment. Public once there was a reveal.
+      revealTrick: this.revealTrick,
       caller: this.caller,
 
       declare: this.declare ? { stage: this.declare.stage, order: this.declare.order.slice(), at: this.declare.at } : null,
